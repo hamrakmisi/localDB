@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -112,6 +114,10 @@ type Manager struct {
 // the common local sockets (Colima, Docker Desktop, default) so the app works
 // without the user exporting any environment variable.
 func New() (*Manager, error) {
+	if err := ensureColimaRunning(); err != nil {
+		return nil, fmt.Errorf("start colima: %w", err)
+	}
+
 	opts := []dockerclient.Opt{
 		dockerclient.FromEnv,
 		dockerclient.WithAPIVersionNegotiation(),
@@ -144,6 +150,26 @@ func detectSocket() string {
 		}
 	}
 	return ""
+}
+
+// ensureColimaRunning starts colima on macOS if it's installed but not
+// already running, so the user doesn't have to remember to start it after
+// every reboot. No-op on other OSes or when colima isn't installed.
+func ensureColimaRunning() error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	if _, err := exec.LookPath("colima"); err != nil {
+		return nil
+	}
+	if err := exec.Command("colima", "status").Run(); err == nil {
+		return nil // already running
+	}
+	fmt.Fprintln(os.Stderr, "localdb: colima not running, starting it...")
+	start := exec.Command("colima", "start")
+	start.Stdout = os.Stderr
+	start.Stderr = os.Stderr
+	return start.Run()
 }
 
 func (m *Manager) Close() error { return m.cli.Close() }
