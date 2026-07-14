@@ -50,7 +50,7 @@ func (m model) statusLine() string {
 
 func (m model) viewList() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("localdb — local MySQL/MariaDB for dev") + "\n\n")
+	b.WriteString(titleStyle.Render("localdb — local databases for dev") + "\n\n")
 
 	if len(m.instances) == 0 {
 		b.WriteString(dimStyle.Render("  No databases yet. Press 'n' to create one.") + "\n")
@@ -126,14 +126,15 @@ func (m model) viewForm() string {
 	}
 
 	if m.formMode == formModeCreate {
-		mysql := dimStyle.Render("  mysql  ")
-		maria := dimStyle.Render("  mariadb  ")
-		if m.formEngine == docker.MySQL {
-			mysql = selStyle.Render("[ mysql ]")
-		} else {
-			maria = selStyle.Render("[ mariadb ]")
+		engines := make([]string, 0, len(docker.Engines))
+		for _, eng := range docker.Engines {
+			name := dimStyle.Render("  " + string(eng) + "  ")
+			if m.formEngine == eng {
+				name = selStyle.Render("[ " + string(eng) + " ]")
+			}
+			engines = append(engines, name)
 		}
-		b.WriteString("\n  Engine    > " + mysql + " " + maria +
+		b.WriteString("\n  Engine    > " + strings.Join(engines, " ") +
 			dimStyle.Render("  (←/→ to toggle)") + "\n")
 	} else {
 		b.WriteString("\n  " + dimStyle.Render("Engine    > "+string(m.editTarget.Engine)+" (locked)") + "\n")
@@ -207,6 +208,9 @@ func (m model) viewRestore() string {
 }
 
 func connString(inst docker.Instance) string {
+	if inst.Engine == docker.Postgres {
+		return fmt.Sprintf("postgresql://%s:****@127.0.0.1:%s/%s", inst.User, inst.Port, inst.Database)
+	}
 	return fmt.Sprintf("mysql://%s:****@127.0.0.1:%s/%s",
 		inst.User, inst.Port, inst.Database)
 }

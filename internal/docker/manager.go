@@ -1,5 +1,5 @@
 // Package docker wraps the minimal Docker engine operations localdb needs to
-// run local MySQL / MariaDB containers for development.
+// run local database containers for development.
 package docker
 
 import (
@@ -39,18 +39,64 @@ const (
 type Engine string
 
 const (
-	MySQL   Engine = "mysql"
-	MariaDB Engine = "mariadb"
+	MySQL    Engine = "mysql"
+	MariaDB  Engine = "mariadb"
+	Postgres Engine = "postgres"
 )
+
+// Engines is the ordered list shown in the UI when creating a database.
+var Engines = []Engine{MySQL, MariaDB, Postgres}
 
 // Image returns the Docker image reference for the engine.
 func (e Engine) Image() string {
 	switch e {
 	case MariaDB:
 		return "mariadb:11"
+	case Postgres:
+		return "postgres:16"
 	default:
 		return "mysql:8.0"
 	}
+}
+
+// DefaultPort is the engine's standard TCP port.
+func (e Engine) DefaultPort() int {
+	if e == Postgres {
+		return 5432
+	}
+	return 3306
+}
+
+func (e Engine) containerPort() nat.Port {
+	return nat.Port(fmt.Sprintf("%d/tcp", e.DefaultPort()))
+}
+
+func (e Engine) dataDir() string {
+	if e == Postgres {
+		return "/var/lib/postgresql/data"
+	}
+	return "/var/lib/mysql"
+}
+
+func (e Engine) environment(spec Spec) []string {
+	if e == Postgres {
+		env := []string{
+			"POSTGRES_USER=" + spec.User,
+			"POSTGRES_DB=" + spec.Database,
+		}
+		if spec.Password == "" {
+			return append(env, "POSTGRES_HOST_AUTH_METHOD=trust")
+		}
+		return append(env, "POSTGRES_PASSWORD="+spec.Password)
+	}
+	env := []string{
+		"MYSQL_USER=" + spec.User,
+		"MYSQL_DATABASE=" + spec.Database,
+	}
+	if spec.Password == "" {
+		return append(env, "MYSQL_ALLOW_EMPTY_PASSWORD=yes")
+	}
+	return append(env, "MYSQL_ROOT_PASSWORD="+spec.Password, "MYSQL_PASSWORD="+spec.Password)
 }
 
 // serverArgs returns extra mysqld flags for the engine. MySQL 8 defaults to the
@@ -61,6 +107,9 @@ func (e Engine) Image() string {
 // clientBin returns the mysql client binary name for the engine.
 // MariaDB 11 dropped the mysql symlink; use mariadb/mariadb-dump instead.
 func (e Engine) clientBin() string {
+	if e == Postgres {
+		return "psql"
+	}
 	if e == MariaDB {
 		return "mariadb"
 	}
@@ -68,6 +117,9 @@ func (e Engine) clientBin() string {
 }
 
 func (e Engine) dumpBin() string {
+	if e == Postgres {
+		return "pg_dump"
+	}
 	if e == MariaDB {
 		return "mariadb-dump"
 	}
@@ -87,7 +139,7 @@ func (e Engine) serverArgs() []string {
 type Spec struct {
 	Name     string // logical name, e.g. "myapp"
 	Engine   Engine
-	Port     int    // host port mapped to container 3306
+	Port     int    // host port mapped to the engine's standard port
 	User     string // non-root app user
 	Password string // password for User (also set as root password)
 	Database string // initial database created on first boot
@@ -226,26 +278,13 @@ func (m *Manager) Create(ctx context.Context, spec Spec) error {
 		return err
 	}
 
-	port := nat.Port("3306/tcp")
+	port := spec.Engine.containerPort()
 	hostPort := fmt.Sprintf("%d", spec.Port)
 
-	env := []string{
-		"MYSQL_USER=" + spec.User,
-		"MYSQL_DATABASE=" + spec.Database,
-	}
-	if spec.Password == "" {
-		env = append(env, "MYSQL_ALLOW_EMPTY_PASSWORD=yes")
-	} else {
-		env = append(env,
-			"MYSQL_ROOT_PASSWORD="+spec.Password,
-			"MYSQL_PASSWORD="+spec.Password,
-		)
-	}
-
 	cfg := &container.Config{
-		Image: spec.Engine.Image(),
-		Env:   env,
-		Cmd:   spec.Engine.serverArgs(),
+		Image:        spec.Engine.Image(),
+		Env:          spec.Engine.environment(spec),
+		Cmd:          spec.Engine.serverArgs(),
 		ExposedPorts: nat.PortSet{port: struct{}{}},
 		Labels: map[string]string{
 			managedLabel: "true",
@@ -263,7 +302,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) error {
 		Mounts: []mount.Mount{{
 			Type:   mount.TypeVolume,
 			Source: volumeName(spec.Name),
-			Target: "/var/lib/mysql",
+			Target: spec.Engine.dataDir(),
 		}},
 		RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 	}
@@ -345,27 +384,38 @@ func (m *Manager) CreateAndStart(ctx context.Context, spec Spec) error {
 	return nil
 }
 
-// containerPassword returns the MYSQL_ROOT_PASSWORD stored in the container env.
-// Returns "" (no error) for passwordless containers (MYSQL_ALLOW_EMPTY_PASSWORD).
-func (m *Manager) containerPassword(ctx context.Context, id string) (string, error) {
+// containerPassword returns the admin password stored in a managed container's
+// environment. It returns "" for passwordless containers.
+func (m *Manager) containerPassword(ctx context.Context, id string, eng Engine) (string, error) {
 	info, err := m.cli.ContainerInspect(ctx, id)
 	if err != nil {
 		return "", err
 	}
+	prefix := "MYSQL_ROOT_PASSWORD="
+	if eng == Postgres {
+		prefix = "POSTGRES_PASSWORD="
+	}
 	for _, env := range info.Config.Env {
-		if strings.HasPrefix(env, "MYSQL_ROOT_PASSWORD=") {
-			return strings.TrimPrefix(env, "MYSQL_ROOT_PASSWORD="), nil
+		if strings.HasPrefix(env, prefix) {
+			return strings.TrimPrefix(env, prefix), nil
 		}
 	}
 	return "", nil // passwordless container
 }
 
-// rootArgs returns the mysql/mysqldump auth flags for root.
+// rootArgs returns the MySQL auth flags for root.
 func rootArgs(password string) []string {
 	if password == "" {
 		return []string{"-uroot"}
 	}
 	return []string{"-uroot", "-p" + password}
+}
+
+func pgEnv(password string) []string {
+	if password == "" {
+		return nil
+	}
+	return []string{"PGPASSWORD=" + password}
 }
 
 // withEnvPath wraps cmd so it runs via /usr/bin/env with an explicit PATH,
@@ -379,8 +429,13 @@ func withEnvPath(cmd []string) []string {
 
 // execCapture runs cmd inside the container and returns stdout bytes.
 func (m *Manager) execCapture(ctx context.Context, id string, cmd []string) ([]byte, error) {
+	return m.execCaptureEnv(ctx, id, cmd, nil)
+}
+
+func (m *Manager) execCaptureEnv(ctx context.Context, id string, cmd, env []string) ([]byte, error) {
 	ex, err := m.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
 		Cmd:          withEnvPath(cmd),
+		Env:          env,
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -408,8 +463,13 @@ func (m *Manager) execCapture(ctx context.Context, id string, cmd []string) ([]b
 
 // execWithStdin runs cmd inside the container piping input to its stdin.
 func (m *Manager) execWithStdin(ctx context.Context, id string, cmd []string, input io.Reader) error {
+	return m.execWithStdinEnv(ctx, id, cmd, nil, input)
+}
+
+func (m *Manager) execWithStdinEnv(ctx context.Context, id string, cmd, env []string, input io.Reader) error {
 	ex, err := m.cli.ContainerExecCreate(ctx, id, container.ExecOptions{
 		Cmd:          withEnvPath(cmd),
+		Env:          env,
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -446,7 +506,20 @@ func (m *Manager) execWithStdin(ctx context.Context, id string, cmd []string, in
 }
 
 // waitReady polls until the DB inside the container accepts a connection.
-func (m *Manager) waitReady(ctx context.Context, id string, eng Engine, password string) error {
+func (m *Manager) waitReady(ctx context.Context, id string, eng Engine, user, database, password string) error {
+	if eng == Postgres {
+		for {
+			_, err := m.execCaptureEnv(ctx, id, []string{"psql", "-U", user, "-d", database, "-c", "SELECT 1"}, pgEnv(password))
+			if err == nil {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("timed out waiting for DB: %w", ctx.Err())
+			case <-time.After(time.Second):
+			}
+		}
+	}
 	client := eng.clientBin()
 	for {
 		_, err := m.execCapture(ctx, id, append(append([]string{client}, rootArgs(password)...), "-e", "SELECT 1"))
@@ -463,14 +536,16 @@ func (m *Manager) waitReady(ctx context.Context, id string, eng Engine, password
 
 // Dump runs the dump tool inside the container and writes the result to destPath.
 func (m *Manager) Dump(ctx context.Context, inst Instance, destPath string) error {
-	pass, err := m.containerPassword(ctx, inst.ID)
+	pass, err := m.containerPassword(ctx, inst.ID, inst.Engine)
 	if err != nil {
 		return err
 	}
-	data, err := m.execCapture(ctx, inst.ID, append(
-		append([]string{inst.Engine.dumpBin()}, rootArgs(pass)...),
-		"--databases", inst.Database,
-	))
+	var data []byte
+	if inst.Engine == Postgres {
+		data, err = m.execCaptureEnv(ctx, inst.ID, []string{"pg_dump", "-U", inst.User, "-d", inst.Database}, pgEnv(pass))
+	} else {
+		data, err = m.execCapture(ctx, inst.ID, append(append([]string{inst.Engine.dumpBin()}, rootArgs(pass)...), "--databases", inst.Database))
+	}
 	if err != nil {
 		return fmt.Errorf("dump: %w", err)
 	}
@@ -479,7 +554,7 @@ func (m *Manager) Dump(ctx context.Context, inst Instance, destPath string) erro
 
 // Restore pipes a SQL file into the DB client inside the container.
 func (m *Manager) Restore(ctx context.Context, inst Instance, srcPath string) error {
-	pass, err := m.containerPassword(ctx, inst.ID)
+	pass, err := m.containerPassword(ctx, inst.ID, inst.Engine)
 	if err != nil {
 		return err
 	}
@@ -488,6 +563,9 @@ func (m *Manager) Restore(ctx context.Context, inst Instance, srcPath string) er
 		return err
 	}
 	defer f.Close()
+	if inst.Engine == Postgres {
+		return m.execWithStdinEnv(ctx, inst.ID, []string{"psql", "-U", inst.User, "-d", inst.Database}, pgEnv(pass), f)
+	}
 	// Append database name so dumps without USE statements restore into the right db.
 	cmd := append(append([]string{inst.Engine.clientBin()}, rootArgs(pass)...), inst.Database)
 	return m.execWithStdin(ctx, inst.ID, cmd, f)
@@ -496,14 +574,16 @@ func (m *Manager) Restore(ctx context.Context, inst Instance, srcPath string) er
 // Clone dumps src then creates a new container (newSpec) and restores the dump into it.
 // src must be running.
 func (m *Manager) Clone(ctx context.Context, src Instance, newSpec Spec) error {
-	pass, err := m.containerPassword(ctx, src.ID)
+	pass, err := m.containerPassword(ctx, src.ID, src.Engine)
 	if err != nil {
 		return err
 	}
-	data, err := m.execCapture(ctx, src.ID, append(
-		append([]string{src.Engine.dumpBin()}, rootArgs(pass)...),
-		"--databases", src.Database,
-	))
+	var data []byte
+	if src.Engine == Postgres {
+		data, err = m.execCaptureEnv(ctx, src.ID, []string{"pg_dump", "-U", src.User, "-d", src.Database}, pgEnv(pass))
+	} else {
+		data, err = m.execCapture(ctx, src.ID, append(append([]string{src.Engine.dumpBin()}, rootArgs(pass)...), "--databases", src.Database))
+	}
 	if err != nil {
 		return fmt.Errorf("dump source: %w", err)
 	}
@@ -514,16 +594,21 @@ func (m *Manager) Clone(ctx context.Context, src Instance, newSpec Spec) error {
 		return err
 	}
 	newCtr := containerName(newSpec.Name)
-	newPass, err := m.containerPassword(ctx, newCtr)
+	newPass, err := m.containerPassword(ctx, newCtr, newSpec.Engine)
 	if err != nil {
 		return err
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	if err := m.waitReady(readyCtx, newCtr, newSpec.Engine, newPass); err != nil {
+	if err := m.waitReady(readyCtx, newCtr, newSpec.Engine, newSpec.User, newSpec.Database, newPass); err != nil {
 		return fmt.Errorf("new container not ready: %w", err)
 	}
-	if err := m.execWithStdin(ctx, newCtr, append([]string{newSpec.Engine.clientBin()}, rootArgs(newPass)...), bytes.NewReader(data)); err != nil {
+	if newSpec.Engine == Postgres {
+		err = m.execWithStdinEnv(ctx, newCtr, []string{"psql", "-U", newSpec.User, "-d", newSpec.Database}, pgEnv(newPass), bytes.NewReader(data))
+	} else {
+		err = m.execWithStdin(ctx, newCtr, append([]string{newSpec.Engine.clientBin()}, rootArgs(newPass)...), bytes.NewReader(data))
+	}
+	if err != nil {
 		return fmt.Errorf("restore into clone: %w", err)
 	}
 	return nil
@@ -533,7 +618,7 @@ func (m *Manager) Clone(ctx context.Context, src Instance, newSpec Spec) error {
 // The logical name must be unchanged so the existing volume is reused.
 // If credentials changed, ALTER USER is applied after the new container is ready.
 func (m *Manager) Recreate(ctx context.Context, inst Instance, newSpec Spec) error {
-	oldPass, _ := m.containerPassword(ctx, inst.ID)
+	oldPass, _ := m.containerPassword(ctx, inst.ID, inst.Engine)
 	oldUser := inst.User
 	wasRunning := inst.State == "running"
 
@@ -560,8 +645,30 @@ func (m *Manager) Recreate(ctx context.Context, inst Instance, newSpec Spec) err
 	newCtr := containerName(newSpec.Name)
 	readyCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	if err := m.waitReady(readyCtx, newCtr, newSpec.Engine, oldPass); err != nil {
+	readyUser := newSpec.User
+	if newSpec.Engine == Postgres {
+		readyUser = oldUser
+	}
+	if err := m.waitReady(readyCtx, newCtr, newSpec.Engine, readyUser, newSpec.Database, oldPass); err != nil {
 		return fmt.Errorf("container not ready: %w", err)
+	}
+
+	if newSpec.Engine == Postgres {
+		// POSTGRES_* variables only initialize an empty volume. Apply edits to
+		// the existing role explicitly when reusing data.
+		var sqlParts []string
+		if userChanged {
+			sqlParts = append(sqlParts, fmt.Sprintf("ALTER ROLE %q RENAME TO %q", oldUser, newSpec.User))
+		}
+		if passwordChanged {
+			sqlParts = append(sqlParts, fmt.Sprintf("ALTER ROLE %q PASSWORD %s", newSpec.User, sqlLiteral(newSpec.Password)))
+		}
+		if len(sqlParts) > 0 {
+			if _, err := m.execCaptureEnv(ctx, newCtr, append([]string{"psql", "-U", oldUser, "-d", newSpec.Database, "-c"}, strings.Join(sqlParts, "; ")), pgEnv(oldPass)); err != nil {
+				return fmt.Errorf("apply credential changes: %w", err)
+			}
+		}
+		return nil
 	}
 
 	var sqlParts []string
@@ -581,3 +688,5 @@ func (m *Manager) Recreate(ctx context.Context, inst Instance, newSpec Spec) err
 	}
 	return nil
 }
+
+func sqlLiteral(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }

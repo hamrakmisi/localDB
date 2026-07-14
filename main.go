@@ -1,5 +1,5 @@
-// Command localdb is a terminal UI to run local MySQL / MariaDB databases in
-// Docker containers for development.
+// Command localdb is a terminal UI to run local database containers for
+// development.
 package main
 
 import (

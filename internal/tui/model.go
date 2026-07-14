@@ -151,9 +151,14 @@ func (m *model) resetForm() {
 		m.inputs[i].Blur()
 	}
 	m.formEngine = docker.MySQL
+	m.setPortPlaceholder()
 	m.formMode = formModeCreate
 	m.formFocus = fName
 	m.inputs[fName].Focus()
+}
+
+func (m *model) setPortPlaceholder() {
+	m.inputs[fPort].Placeholder = strconv.Itoa(m.formEngine.DefaultPort())
 }
 
 func (m *model) openEditForm(inst docker.Instance) {
@@ -239,9 +244,13 @@ func (m model) buildSpec() (docker.Spec, error) {
 	if strings.ContainsAny(name, " /\\:") {
 		return docker.Spec{}, fmt.Errorf("name: no spaces or / \\ :")
 	}
+	eng := m.formEngine
+	if m.formMode == formModeEdit {
+		eng = m.editTarget.Engine // locked in edit mode
+	}
 	portStr := strings.TrimSpace(m.inputs[fPort].Value())
 	if portStr == "" {
-		portStr = "3306"
+		portStr = strconv.Itoa(eng.DefaultPort())
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
@@ -255,10 +264,6 @@ func (m model) buildSpec() (docker.Spec, error) {
 	db := strings.TrimSpace(m.inputs[fDatabase].Value())
 	if db == "" {
 		db = name
-	}
-	eng := m.formEngine
-	if m.formMode == formModeEdit {
-		eng = m.editTarget.Engine // locked in edit mode
 	}
 	return docker.Spec{
 		Name:     name,

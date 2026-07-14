@@ -1,6 +1,6 @@
 # localdb
 
-A tiny terminal UI to run local **MySQL** / **MariaDB** databases in Docker for
+A tiny terminal UI to run local **MySQL**, **MariaDB**, and **PostgreSQL** databases in Docker for
 development. Pick a name, port, user, and password — it spins up a container
 with a persistent named volume. That's it.
 
@@ -42,16 +42,16 @@ go build -o localdb .
 | Key | Action |
 |-----|--------|
 | tab / ↑↓ | next / previous field |
-| ←/→ | toggle MySQL ↔ MariaDB |
+| ←/→ | choose MySQL, MariaDB, or PostgreSQL |
 | enter | create & start |
 | esc | cancel |
 
 ## What it does under the hood
 
-- Creates a container named `localdb-<name>` from `mysql:8` or `mariadb:11`.
-- Binds the chosen host port to container port `3306` on `127.0.0.1`.
-- Sets `MYSQL_ROOT_PASSWORD`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`.
-- Mounts a named volume `localdb-<name>-data` at `/var/lib/mysql` so data
+- Creates a container named `localdb-<name>` from `mysql:8`, `mariadb:11`, or `postgres:16`.
+- Binds the chosen host port to the engine's standard port (`3306` for MySQL/MariaDB, `5432` for PostgreSQL) on `127.0.0.1`.
+- Configures the matching MySQL/MariaDB or PostgreSQL initialization variables.
+- Mounts a named volume `localdb-<name>-data` at the engine's data directory so data
   survives restarts.
 - Labels everything `localdb.managed=true` — it only ever lists or touches its
   own containers.
@@ -60,4 +60,10 @@ Connect with any client:
 
 ```sh
 mysql -h 127.0.0.1 -P <port> -u <user> -p <database>
+```
+
+For PostgreSQL:
+
+```sh
+psql "postgresql://<user>@127.0.0.1:<port>/<database>"
 ```

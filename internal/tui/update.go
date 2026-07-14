@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"localdb/internal/docker"
 )
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -182,11 +183,13 @@ func (m model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.refocus()
 	case "left", "right":
 		if m.formMode == formModeCreate {
-			if m.formEngine == "mysql" {
-				m.formEngine = "mariadb"
-			} else {
-				m.formEngine = "mysql"
+			for i, eng := range docker.Engines {
+				if eng == m.formEngine {
+					m.formEngine = docker.Engines[(i+1)%len(docker.Engines)]
+					break
+				}
 			}
+			m.setPortPlaceholder()
 		}
 		return m, nil
 	case "enter":
