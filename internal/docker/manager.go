@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,7 +129,7 @@ func (e Engine) dumpBin() string {
 
 func (e Engine) serverArgs() []string {
 	switch e {
-	case MariaDB:
+	case MariaDB, Postgres:
 		return nil
 	default:
 		return []string{"--default-authentication-plugin=mysql_native_password"}
@@ -155,6 +156,7 @@ type Instance struct {
 	Database string
 	State    string // running, exited, ...
 	Status   string // human-readable, e.g. "Up 2 minutes"
+	Ready    bool   // database accepts authenticated connections
 }
 
 // Manager talks to the Docker engine.
@@ -233,6 +235,47 @@ func (m *Manager) Ping(ctx context.Context) error {
 		return fmt.Errorf("docker engine unreachable (is colima started?): %w", err)
 	}
 	return nil
+}
+
+// ConnectionURI returns a URI suitable for pasting into a database client.
+func (m *Manager) ConnectionURI(ctx context.Context, inst Instance) (string, error) {
+	password, err := m.containerPassword(ctx, inst.ID, inst.Engine)
+	if err != nil {
+		return "", err
+	}
+	scheme := "mysql"
+	if inst.Engine == Postgres {
+		scheme = "postgresql"
+	}
+	u := &url.URL{
+		Scheme: scheme,
+		Host:   "127.0.0.1:" + inst.Port,
+		Path:   inst.Database,
+	}
+	if password == "" {
+		u.User = url.User(inst.User)
+	} else {
+		u.User = url.UserPassword(inst.User, password)
+	}
+	return u.String(), nil
+}
+
+// Logs returns the latest combined stdout/stderr lines from a managed container.
+func (m *Manager) Logs(ctx context.Context, id string) (string, error) {
+	rc, err := m.cli.ContainerLogs(ctx, id, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       "100",
+	})
+	if err != nil {
+		return "", fmt.Errorf("container logs: %w", err)
+	}
+	defer rc.Close()
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, rc); err != nil {
+		return "", fmt.Errorf("read logs: %w", err)
+	}
+	return stdout.String() + stderr.String(), nil
 }
 
 func containerName(logical string) string { return namePrefix + logical }
@@ -532,6 +575,23 @@ func (m *Manager) waitReady(ctx context.Context, id string, eng Engine, user, da
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// Ready checks whether a running database accepts an authenticated query.
+func (m *Manager) Ready(ctx context.Context, inst Instance) error {
+	if inst.State != "running" {
+		return fmt.Errorf("container is not running")
+	}
+	password, err := m.containerPassword(ctx, inst.ID, inst.Engine)
+	if err != nil {
+		return err
+	}
+	if inst.Engine == Postgres {
+		_, err = m.execCaptureEnv(ctx, inst.ID, []string{"psql", "-U", inst.User, "-d", inst.Database, "-c", "SELECT 1"}, pgEnv(password))
+		return err
+	}
+	_, err = m.execCapture(ctx, inst.ID, append(append([]string{inst.Engine.clientBin()}, rootArgs(password)...), "-e", "SELECT 1"))
+	return err
 }
 
 // Dump runs the dump tool inside the container and writes the result to destPath.

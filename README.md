@@ -35,6 +35,8 @@ go build -o localdb .
 | `s` | start / stop selected |
 | `d` | delete selected (container + data volume) |
 | `r` | refresh |
+| `p` | copy selected database connection URI |
+| `l` | view the selected container's latest logs |
 | `q` | quit |
 
 **New-database form**
@@ -55,6 +57,7 @@ go build -o localdb .
   survives restarts.
 - Labels everything `localdb.managed=true` — it only ever lists or touches its
   own containers.
+- Shows whether each running database is actually ready to accept connections.
 
 Connect with any client:
 

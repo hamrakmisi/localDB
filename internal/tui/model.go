@@ -22,6 +22,7 @@ const (
 	screenConfirmDelete
 	screenClone
 	screenRestore
+	screenLogs
 )
 
 type formMode int
@@ -72,6 +73,10 @@ type model struct {
 	restoreFiles  []string // absolute paths to .sql files
 	restoreCursor int
 	restoreTarget docker.Instance
+
+	// log screen
+	logsTarget  docker.Instance
+	logsContent string
 
 	busy    bool   // an async op is in flight
 	status  string // transient status / error line

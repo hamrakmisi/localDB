@@ -56,6 +56,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("Saved → %s", filepath.Base(msg.path))
 		return m, nil
 
+	case logsLoadedMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = "ERR: " + msg.err.Error()
+			return m, nil
+		}
+		m.logsContent = msg.content
+		m.status = ""
+		return m, nil
+
+	case copyDoneMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = "ERR: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = "Connection URI copied."
+		return m, nil
+
 	case tea.KeyMsg:
 		switch m.screen {
 		case screenList:
@@ -68,6 +87,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateClone(msg)
 		case screenRestore:
 			return m.updateRestore(msg)
+		case screenLogs:
+			return m.updateLogs(msg)
 		}
 	}
 	return m, nil
@@ -149,6 +170,37 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenRestore
 			m.status = ""
 			return m, nil
+		}
+	case "p":
+		if inst, ok := m.selected(); ok && !m.busy {
+			m.busy = true
+			m.status = "Copying connection URI…"
+			return m, m.copyConnection(inst)
+		}
+	case "l":
+		if inst, ok := m.selected(); ok && !m.busy {
+			m.logsTarget = inst
+			m.logsContent = ""
+			m.screen = screenLogs
+			m.busy = true
+			m.status = "Loading logs…"
+			return m, m.loadLogs(inst)
+		}
+	}
+	return m, nil
+}
+
+func (m model) updateLogs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.screen = screenList
+		m.status = ""
+		return m, nil
+	case "r":
+		if !m.busy {
+			m.busy = true
+			m.status = "Loading logs…"
+			return m, m.loadLogs(m.logsTarget)
 		}
 	}
 	return m, nil

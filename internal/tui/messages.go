@@ -2,6 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,6 +32,11 @@ type (
 		path string
 		err  error
 	}
+	logsLoadedMsg struct {
+		content string
+		err     error
+	}
+	copyDoneMsg struct{ err error }
 	// pingMsg reports initial Docker reachability.
 	pingMsg struct{ err error }
 )
@@ -44,8 +54,70 @@ func (m model) loadList() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		ins, err := m.mgr.List(ctx)
+		if err == nil {
+			readyCtx, cancelReady := context.WithTimeout(ctx, 5*time.Second)
+			var wg sync.WaitGroup
+			for i := range ins {
+				if ins[i].State != "running" {
+					continue
+				}
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					ins[i].Ready = m.mgr.Ready(readyCtx, ins[i]) == nil
+				}(i)
+			}
+			wg.Wait()
+			cancelReady()
+		}
 		return listLoadedMsg{instances: ins, err: err}
 	}
+}
+
+func (m model) loadLogs(inst docker.Instance) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		content, err := m.mgr.Logs(ctx, inst.ID)
+		return logsLoadedMsg{content: content, err: err}
+	}
+}
+
+func (m model) copyConnection(inst docker.Instance) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		uri, err := m.mgr.ConnectionURI(ctx, inst)
+		if err != nil {
+			return copyDoneMsg{err: err}
+		}
+		return copyDoneMsg{err: copyToClipboard(uri)}
+	}
+}
+
+func copyToClipboard(value string) error {
+	var command string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		command = "pbcopy"
+	case "windows":
+		command = "clip"
+	default:
+		if _, err := exec.LookPath("wl-copy"); err == nil {
+			command = "wl-copy"
+		} else if _, err := exec.LookPath("xclip"); err == nil {
+			command, args = "xclip", []string{"-selection", "clipboard"}
+		} else {
+			return fmt.Errorf("clipboard tool not found (install wl-copy or xclip)")
+		}
+	}
+	cmd := exec.Command(command, args...)
+	cmd.Stdin = strings.NewReader(value)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("copy connection URI: %w", err)
+	}
+	return nil
 }
 
 func (m model) createInstance(spec docker.Spec) tea.Cmd {

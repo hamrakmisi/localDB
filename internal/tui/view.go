@@ -33,6 +33,8 @@ func (m model) View() string {
 		return m.viewClone()
 	case screenRestore:
 		return m.viewRestore()
+	case screenLogs:
+		return m.viewLogs()
 	default:
 		return m.viewList()
 	}
@@ -67,7 +69,7 @@ func (m model) viewList() string {
 	}
 
 	b.WriteString("\n" + helpStyle.Render(
-		"  ↑/↓ move · n new · e edit · s start/stop · c clone · x dump · i import · d delete · r refresh · q quit"))
+		"  ↑/↓ move · n new · e edit · s start/stop · p copy URI · l logs · c clone · x dump · i import · d delete · r refresh · q quit"))
 	return b.String()
 }
 
@@ -81,14 +83,14 @@ func (m model) renderTable() string {
 		}
 		rows = append(rows, []string{
 			cur, inst.Name, string(inst.Engine), inst.Port,
-			inst.State, trunc(inst.Status, 18),
+			inst.State, readiness(inst), trunc(inst.Status, 18),
 		})
 	}
 
 	t := table.New().
 		Border(lipgloss.RoundedBorder()).
 		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("63"))).
-		Headers("", "NAME", "ENGINE", "PORT", "STATE", "STATUS").
+		Headers("", "NAME", "ENGINE", "PORT", "STATE", "READY", "STATUS").
 		Rows(rows...).
 		StyleFunc(func(row, col int) lipgloss.Style {
 			st := lipgloss.NewStyle().Padding(0, 1)
@@ -102,11 +104,26 @@ func (m model) renderTable() string {
 					return st.Foreground(lipgloss.Color("42"))
 				}
 				return st.Foreground(lipgloss.Color("203"))
+			case col == 5 && row < len(m.instances):
+				if m.instances[row].Ready {
+					return st.Foreground(lipgloss.Color("42"))
+				}
+				return st.Foreground(lipgloss.Color("245"))
 			}
 			return st
 		})
 
 	return lipgloss.NewStyle().MarginLeft(2).Render(t.String())
+}
+
+func readiness(inst docker.Instance) string {
+	if inst.State != "running" {
+		return "—"
+	}
+	if inst.Ready {
+		return "ready"
+	}
+	return "starting"
 }
 
 func (m model) viewForm() string {
@@ -204,6 +221,26 @@ func (m model) viewRestore() string {
 
 	b.WriteString("\n" + helpStyle.Render(
 		"  ↑/↓ move · enter restore · esc cancel"))
+	return b.String()
+}
+
+func (m model) viewLogs() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Logs — "+m.logsTarget.Name) + "\n\n")
+	if m.busy {
+		b.WriteString(dimStyle.Render("  Loading recent container logs…\n"))
+	} else if strings.TrimSpace(m.logsContent) == "" {
+		b.WriteString(dimStyle.Render("  No container logs yet.\n"))
+	} else {
+		b.WriteString(m.logsContent)
+		if !strings.HasSuffix(m.logsContent, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	if s := m.statusLine(); s != "" {
+		b.WriteString("\n  " + s + "\n")
+	}
+	b.WriteString("\n" + helpStyle.Render("  r refresh · esc back"))
 	return b.String()
 }
 
